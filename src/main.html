@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Chat</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .success { background-color: #dff0d8; color: #3c763d; }
+        .error { background-color: #f2dede; color: #a94442; }
+        #messages {
+            margin-top: 20px;
+            border: 1px solid #ccc;
+            padding: 10px;
+            height: 300px;
+            overflow-y: auto;
+            background-color: #fff;
+        }
+        .message {
+            margin: 5px 0;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .message strong {
+            color: #333;
+        }
+        input[type="text"], input[type="password"] {
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            width: calc(100% - 20px);
+            max-width: 300px;
+            display: block;
+        }
+        button {
+            padding: 10px 15px;
+            margin: 5px;
+            border: none;
+            background-color: #007bff;
+            color: #fff;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+<div id="statusMessages" class="status"></div>
+<div>
+    <input type="text" id="username" placeholder="Username">
+    <input type="password" id="password" placeholder="Password">
+    <button onclick="register()">Register</button>
+    <button onclick="connect()">Connect</button>
+</div>
+<div>
+    <input type="text" id="message" placeholder="Type a message...">
+    <button onclick="sendMessage()" id="sendButton">Send</button>
+</div>
+<div id="messages"></div>
+
+<script>
+    let ws;
+    let username;
+    let isAuthenticated = false;
+
+    function showStatus(message, isError = false) {
+        const statusDiv = document.getElementById('statusMessages');
+        statusDiv.textContent = message;
+        statusDiv.className = 'status ' + (isError ? 'error' : 'success');
+        console.log(message);
+    }
+
+    function toggleMessageInput(enabled) {
+        document.getElementById('message').disabled = !enabled;
+        document.getElementById('sendButton').disabled = !enabled;
+        isAuthenticated = enabled;
+    }
+
+    function addMessage(message) {
+        const messagesDiv = document.getElementById('messages');
+        const messageElement = document.createElement('div');
+        messageElement.className = 'message';
+        messageElement.innerHTML = `<strong>${message.from}:</strong> ${message.content}`;
+        messagesDiv.appendChild(messageElement);
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    function register() {
+        username = document.getElementById('username').value.trim();
+        const password = document.getElementById('password').value.trim();
+
+        if (!username || !password) {
+            showStatus('Please enter both username and password', true);
+            return;
+        }
+
+        showStatus('Attempting to register...');
+        initializeWebSocket('register', { username, password });
+    }
+
+    function connect() {
+        username = document.getElementById('username').value.trim();
+        const password = document.getElementById('password').value.trim();
+
+        if (!username || !password) {
+            showStatus('Please enter both username and password', true);
+            return;
+        }
+
+        showStatus('Attempting to connect...');
+        initializeWebSocket('login', { username, password });
+    }
+
+    function initializeWebSocket(type, credentials) {
+        ws = new WebSocket('ws://localhost:8080');
+
+        ws.onopen = () => {
+            showStatus('Connected to server');
+            ws.send(JSON.stringify({ type, ...credentials }));
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const message = JSON.parse(event.data);
+                if (message.content) {
+                    addMessage(message);
+                } else {
+                    handleServerResponse(event.data);
+                }
+            } catch (e) {
+                showStatus('Server response: ' + event.data);
+            }
+        };
+
+        ws.onerror = (error) => {
+            showStatus('WebSocket error: ' + error.message, true);
+        };
+
+        ws.onclose = () => {
+            showStatus('Connection closed');
+            toggleMessageInput(false);
+        };
+    }
+
+    function handleServerResponse(response) {
+        if (response === 'Authentication successful') {
+            showStatus('Successfully authenticated');
+            toggleMessageInput(true);
+        } else if (response === 'Authentication failed' || response === 'Registration failed') {
+            showStatus(response, true);
+        } else {
+            showStatus(response);
+        }
+    }
+
+    function sendMessage() {
+        const content = document.getElementById('message').value.trim();
+        if (!content) return;
+
+        const message = {
+            from: username,
+            content,
+            timestamp: Date.now()
+        };
+
+        try {
+            ws.send(JSON.stringify(message));
+            document.getElementById('message').value = '';
+        } catch (error) {
+            showStatus('Error sending message: ' + error.message, true);
+        }
+    }
+
+    document.getElementById('message').addEventListener('keypress', function (e) {
+        if (e.key === 'Enter') {
+            sendMessage();
+        }
+    });
+</script>
+</body>
+</html>
