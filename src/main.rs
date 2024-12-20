@@ -74,10 +74,8 @@ impl ChatServer {
         println!("Client connected.");
         let (mut write, mut read) = ws_stream.split();
 
-        // Subscription to broadcast channel
         let mut rx = self.tx.subscribe();
 
-        // ---- STEP 1: AUTHENTICATION ----
         let initial_msg = match read.next().await {
             Some(Ok(WsMessage::Text(msg))) => msg,
             Some(Ok(WsMessage::Binary(_))) => {
@@ -114,16 +112,13 @@ impl ChatServer {
             }
         };
 
-        // We'll store the authenticated username here, once known.
         let mut authenticated_username: Option<String> = None;
 
-        // Process authentication
         if let Err(e) = self.process_auth(&auth_val, &mut write, &mut authenticated_username).await {
             let _ = write.send(WsMessage::Text(e)).await;
             return;
         }
 
-        // If no authenticated user by now, something is wrong.
         let username = match authenticated_username {
             Some(u) => u,
             None => {
@@ -132,14 +127,12 @@ impl ChatServer {
             }
         };
 
-        // ---- STEP 2: SEND MESSAGE HISTORY ----
         if let Err(e) = self.send_message_history(&mut write).await {
             eprintln!("Failed to send message history: {}", e);
             self.disconnect_user(&username).await;
             return;
         }
 
-        // ---- STEP 3: MAIN LOOP ----
         loop {
             tokio::select! {
                 maybe_msg = read.next() => {
@@ -163,14 +156,11 @@ impl ChatServer {
                             }
                         }
                         Some(Ok(WsMessage::Pong(_))) => {
-                            // Ignore pongs
                         }
                         Some(Ok(WsMessage::Close(_))) => {
-                            // Client requested to close
                             break;
                         }
                         Some(Ok(WsMessage::Frame(_))) => {
-                            // Frame messages are low-level, ignore them
                             eprintln!("Received unsupported Frame message. Ignoring.");
                         }
                         Some(Err(e)) => {
@@ -178,7 +168,6 @@ impl ChatServer {
                             break;
                         }
                         None => {
-                            // Client disconnected
                             break;
                         }
                     }
@@ -193,7 +182,6 @@ impl ChatServer {
                             }
                         }
                         Err(_) => {
-                            // Broadcast channel closed unexpectedly
                             break;
                         }
                     }
@@ -202,7 +190,6 @@ impl ChatServer {
         }
 
         println!("Client disconnected: {}", username);
-        // Mark user as disconnected
         self.disconnect_user(&username).await;
     }
 
@@ -228,7 +215,6 @@ impl ChatServer {
                     .send(WsMessage::Text("Registration successful".into()))
                     .await
                     .map_err(|_| "Failed to send registration success message")?;
-                // Registration does not log the user in. They must send a login message after this.
             }
             "login" => {
                 if self.authenticate_user(&username, &password).await {
@@ -273,7 +259,6 @@ impl ChatServer {
         Ok(())
     }
 
-    // Removes the given user from the connected_users set
     async fn disconnect_user(&self, username: &str) {
         let mut connected = self.connected_users.lock().await;
         connected.remove(username);
