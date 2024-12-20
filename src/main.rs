@@ -5,6 +5,7 @@ use tokio_tungstenite::{accept_async};
 use futures::{StreamExt, SinkExt};
 use serde::{Serialize, Deserialize};
 use tokio::sync::{broadcast, Mutex};
+use uuid::Uuid;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Message {
@@ -57,7 +58,8 @@ impl ChatServer {
             Ok(ws_stream) => {
                 let (mut writer, mut reader) = ws_stream.split();
                 let mut receiver = self.broadcaster.subscribe();
-
+                let client_id = uuid::Uuid::new_v4().to_string(); // Generate a unique ID for the client.
+    
                 if let Some(Ok(raw_msg)) = reader.next().await {
                     if raw_msg.is_text() {
                         if let Ok(auth_request) = serde_json::from_str::<HashMap<String, String>>(raw_msg.to_text().unwrap()) {
@@ -94,19 +96,20 @@ impl ChatServer {
                         eprintln!("Received a non-text message, ignoring.");
                     }
                 }
-
+    
                 let history = self.messages.lock().await.clone();
                 for msg in history {
                     if let Ok(serialized) = serde_json::to_string(&msg) {
                         let _ = writer.send(serialized.into()).await;
                     }
                 }
-
+    
                 loop {
                     tokio::select! {
                         Some(Ok(raw_msg)) = reader.next() => {
                             if raw_msg.is_text() {
-                                if let Ok(message) = serde_json::from_str::<Message>(raw_msg.to_text().unwrap()) {
+                                if let Ok(mut message) = serde_json::from_str::<Message>(raw_msg.to_text().unwrap()) {
+                                    message.from = client_id.clone(); // Add client ID to the message.
                                     self.broadcast_message(message).await;
                                 } else {
                                     eprintln!("Failed to parse message");
@@ -114,8 +117,11 @@ impl ChatServer {
                             }
                         }
                         Ok(message) = receiver.recv() => {
-                            if let Ok(serialized) = serde_json::to_string(&message) {
-                                let _ = writer.send(serialized.into()).await;
+                            // Skip sending back to the original sender.
+                            if message.from != client_id {
+                                if let Ok(serialized) = serde_json::to_string(&message) {
+                                    let _ = writer.send(serialized.into()).await;
+                                }
                             }
                         }
                     }
