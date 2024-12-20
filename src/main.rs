@@ -1,11 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+use futures::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::{accept_async};
-use futures::{StreamExt, SinkExt};
-use serde::{Serialize, Deserialize};
 use tokio::sync::{broadcast, Mutex};
-use uuid::Uuid;
+use tokio_tungstenite::{
+    accept_async,
+    tungstenite::{self, protocol::Message as WsMessage},
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Message {
@@ -16,133 +19,280 @@ struct Message {
 
 struct ChatServer {
     messages: Arc<Mutex<Vec<Message>>>,
-    users: Arc<Mutex<HashMap<String, String>>>, // username -> password
-    broadcaster: broadcast::Sender<Message>,
+    users: Arc<Mutex<HashMap<String, String>>>,
+    connected_users: Arc<Mutex<HashSet<String>>>,
+    tx: broadcast::Sender<Message>,
 }
 
 impl ChatServer {
     fn new() -> Self {
-        let (broadcaster, _) = broadcast::channel(100);
-        ChatServer {
+        let (tx, _) = broadcast::channel(100);
+        Self {
             messages: Arc::new(Mutex::new(Vec::new())),
             users: Arc::new(Mutex::new(HashMap::new())),
-            broadcaster,
+            connected_users: Arc::new(Mutex::new(HashSet::new())),
+            tx,
         }
     }
 
     async fn register_user(&self, username: &str, password: &str) -> Result<(), String> {
         let mut users = self.users.lock().await;
-        if users.contains_key(username) {
-            Err("Username already exists".to_string())
-        } else {
-            users.insert(username.to_string(), password.to_string());
-            Ok(())
+        if username.is_empty() || password.is_empty() {
+            return Err("Username or password cannot be empty.".into());
         }
+        if users.contains_key(username) {
+            return Err("Username already exists".into());
+        }
+        users.insert(username.to_string(), password.to_string());
+        Ok(())
     }
 
     async fn authenticate_user(&self, username: &str, password: &str) -> bool {
         let users = self.users.lock().await;
-        users.get(username).map_or(false, |stored_password| stored_password == password)
-    }
-
-    async fn broadcast_message(&self, message: Message) {
-        let mut messages = self.messages.lock().await;
-        messages.push(message.clone());
-        if let Err(e) = self.broadcaster.send(message) {
-            eprintln!("Failed to broadcast message: {}", e);
+        match users.get(username) {
+            Some(stored) => stored == password,
+            None => false,
         }
     }
 
+    async fn broadcast_message(&self, message: Message) {
+        if let Err(e) = self.tx.send(message.clone()) {
+            eprintln!("Broadcast error: {}", e);
+        }
+        self.messages.lock().await.push(message);
+    }
+
     async fn handle_connection(&self, stream: TcpStream) {
-        match accept_async(stream).await {
-            Ok(ws_stream) => {
-                let (mut writer, mut reader) = ws_stream.split();
-                let mut receiver = self.broadcaster.subscribe();
-                let client_id = uuid::Uuid::new_v4().to_string(); // Generate a unique ID for the client.
-    
-                if let Some(Ok(raw_msg)) = reader.next().await {
-                    if raw_msg.is_text() {
-                        if let Ok(auth_request) = serde_json::from_str::<HashMap<String, String>>(raw_msg.to_text().unwrap()) {
-                            match auth_request.get("type").map(String::as_str) {
-                                Some("register") => {
-                                    let username = auth_request["username"].clone();
-                                    let password = auth_request["password"].clone();
-                                    let response = match self.register_user(&username, &password).await {
-                                        Ok(_) => "Registration successful".to_string(),
-                                        Err(e) => e,
-                                    };
-                                    let _ = writer.send(response.into()).await;
-                                }
-                                Some("login") => {
-                                    let username = auth_request["username"].clone();
-                                    let password = auth_request["password"].clone();
-                                    let response = if self.authenticate_user(&username, &password).await {
-                                        "Authentication successful"
-                                    } else {
-                                        "Authentication failed"
-                                    };
-                                    let _ = writer.send(response.into()).await;
-                                }
-                                _ => {
-                                    let _ = writer.send("Invalid request type".into()).await;
-                                    return;
-                                }
-                            }
-                        } else {
-                            let _ = writer.send("Invalid authentication request".into()).await;
-                            return;
-                        }
-                    } else {
-                        eprintln!("Received a non-text message, ignoring.");
-                    }
-                }
-    
-                let history = self.messages.lock().await.clone();
-                for msg in history {
-                    if let Ok(serialized) = serde_json::to_string(&msg) {
-                        let _ = writer.send(serialized.into()).await;
-                    }
-                }
-    
-                loop {
-                    tokio::select! {
-                        Some(Ok(raw_msg)) = reader.next() => {
-                            if raw_msg.is_text() {
-                                if let Ok(mut message) = serde_json::from_str::<Message>(raw_msg.to_text().unwrap()) {
-                                    message.from = client_id.clone(); // Add client ID to the message.
+        let ws_stream = match accept_async(stream).await {
+            Ok(ws) => ws,
+            Err(e) => {
+                eprintln!("WebSocket handshake failed: {}", e);
+                return;
+            }
+        };
+
+        println!("Client connected.");
+        let (mut write, mut read) = ws_stream.split();
+
+        // Subscription to broadcast channel
+        let mut rx = self.tx.subscribe();
+
+        // ---- STEP 1: AUTHENTICATION ----
+        let initial_msg = match read.next().await {
+            Some(Ok(WsMessage::Text(msg))) => msg,
+            Some(Ok(WsMessage::Binary(_))) => {
+                let _ = write.send(WsMessage::Text("Expected auth as text, got binary".into())).await;
+                return;
+            }
+            Some(Ok(WsMessage::Ping(p))) => {
+                let _ = write.send(WsMessage::Pong(p)).await;
+                let _ = write.send(WsMessage::Text("No auth message received".into())).await;
+                return;
+            }
+            Some(Ok(WsMessage::Pong(_))) => {
+                let _ = write.send(WsMessage::Text("No auth message received".into())).await;
+                return;
+            }
+            Some(Ok(WsMessage::Close(_))) | None => {
+                return;
+            }
+            Some(Ok(WsMessage::Frame(_))) => {
+                let _ = write.send(WsMessage::Text("Unexpected Frame message".into())).await;
+                return;
+            }
+            Some(Err(e)) => {
+                eprintln!("WebSocket error during auth: {}", e);
+                return;
+            }
+        };
+
+        let auth_val: serde_json::Value = match serde_json::from_str(&initial_msg) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = write.send(WsMessage::Text("Invalid JSON format for auth".into())).await;
+                return;
+            }
+        };
+
+        // We'll store the authenticated username here, once known.
+        let mut authenticated_username: Option<String> = None;
+
+        // Process authentication
+        if let Err(e) = self.process_auth(&auth_val, &mut write, &mut authenticated_username).await {
+            let _ = write.send(WsMessage::Text(e)).await;
+            return;
+        }
+
+        // If no authenticated user by now, something is wrong.
+        let username = match authenticated_username {
+            Some(u) => u,
+            None => {
+                let _ = write.send(WsMessage::Text("No authenticated user".into())).await;
+                return;
+            }
+        };
+
+        // ---- STEP 2: SEND MESSAGE HISTORY ----
+        if let Err(e) = self.send_message_history(&mut write).await {
+            eprintln!("Failed to send message history: {}", e);
+            self.disconnect_user(&username).await;
+            return;
+        }
+
+        // ---- STEP 3: MAIN LOOP ----
+        loop {
+            tokio::select! {
+                maybe_msg = read.next() => {
+                    match maybe_msg {
+                        Some(Ok(WsMessage::Text(msg))) => {
+                            match serde_json::from_str::<Message>(&msg) {
+                                Ok(message) => {
                                     self.broadcast_message(message).await;
-                                } else {
-                                    eprintln!("Failed to parse message");
+                                }
+                                Err(_) => {
+                                    let _ = write.send(WsMessage::Text("Invalid message format".into())).await;
                                 }
                             }
                         }
-                        Ok(message) = receiver.recv() => {
-                            // Skip sending back to the original sender.
-                            if message.from != client_id {
-                                if let Ok(serialized) = serde_json::to_string(&message) {
-                                    let _ = writer.send(serialized.into()).await;
+                        Some(Ok(WsMessage::Binary(_))) => {
+                            let _ = write.send(WsMessage::Text("Binary messages not supported".into())).await;
+                        }
+                        Some(Ok(WsMessage::Ping(p))) => {
+                            if write.send(WsMessage::Pong(p)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(Ok(WsMessage::Pong(_))) => {
+                            // Ignore pongs
+                        }
+                        Some(Ok(WsMessage::Close(_))) => {
+                            // Client requested to close
+                            break;
+                        }
+                        Some(Ok(WsMessage::Frame(_))) => {
+                            // Frame messages are low-level, ignore them
+                            eprintln!("Received unsupported Frame message. Ignoring.");
+                        }
+                        Some(Err(e)) => {
+                            eprintln!("WebSocket error: {}", e);
+                            break;
+                        }
+                        None => {
+                            // Client disconnected
+                            break;
+                        }
+                    }
+                }
+                broadcast_msg = rx.recv() => {
+                    match broadcast_msg {
+                        Ok(msg) => {
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                if write.send(WsMessage::Text(json)).await.is_err() {
+                                    break;
                                 }
                             }
+                        }
+                        Err(_) => {
+                            // Broadcast channel closed unexpectedly
+                            break;
                         }
                     }
                 }
             }
-            Err(e) => eprintln!("Failed to accept websocket connection: {}", e),
         }
+
+        println!("Client disconnected: {}", username);
+        // Mark user as disconnected
+        self.disconnect_user(&username).await;
+    }
+
+    async fn process_auth<W>(
+        &self,
+        auth: &serde_json::Value,
+        write: &mut W,
+        authenticated_username: &mut Option<String>,
+    ) -> Result<(), String>
+    where
+        W: SinkExt<WsMessage, Error = tungstenite::Error> + Unpin,
+    {
+        let auth_type = auth["type"].as_str().ok_or("Missing auth type")?;
+        let username = auth["username"].as_str().unwrap_or("").to_string();
+        let password = auth["password"].as_str().unwrap_or("").to_string();
+
+        match auth_type {
+            "register" => {
+                self.register_user(&username, &password)
+                    .await
+                    .map_err(|e| format!("Registration failed: {}", e))?;
+                write
+                    .send(WsMessage::Text("Registration successful".into()))
+                    .await
+                    .map_err(|_| "Failed to send registration success message")?;
+                // Registration does not log the user in. They must send a login message after this.
+            }
+            "login" => {
+                if self.authenticate_user(&username, &password).await {
+                    // Check if this user is already connected
+                    {
+                        let mut connected = self.connected_users.lock().await;
+                        if connected.contains(&username) {
+                            return Err("User is already connected".into());
+                        }
+                        // Mark user as connected
+                        connected.insert(username.clone());
+                    }
+
+                    write
+                        .send(WsMessage::Text("Authentication successful".into()))
+                        .await
+                        .map_err(|_| "Failed to send authentication success message")?;
+
+                    *authenticated_username = Some(username);
+                } else {
+                    return Err("Authentication failed".into());
+                }
+            }
+            _ => return Err("Invalid authentication type".into()),
+        }
+
+        Ok(())
+    }
+
+    async fn send_message_history<W>(&self, write: &mut W) -> Result<(), tungstenite::Error>
+    where
+        W: SinkExt<WsMessage, Error = tungstenite::Error> + Unpin,
+    {
+        let messages = self.messages.lock().await;
+        for msg in messages.iter() {
+            let json = match serde_json::to_string(msg) {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            write.send(WsMessage::Text(json)).await?;
+        }
+        Ok(())
+    }
+
+    // Removes the given user from the connected_users set
+    async fn disconnect_user(&self, username: &str) {
+        let mut connected = self.connected_users.lock().await;
+        connected.remove(username);
     }
 }
 
 #[tokio::main]
 async fn main() {
     let server = Arc::new(ChatServer::new());
-    let listener = TcpListener::bind("127.0.0.1:8080").await.expect("Failed to bind server");
+    let listener = TcpListener::bind("0.0.0.0:8080")
+        .await
+        .expect("Failed to bind to address");
 
-    println!("WebSocket server listening on ws://127.0.0.1:8080");
+    println!("WebSocket server listening on ws://0.0.0.0:8080");
 
     while let Ok((stream, _)) = listener.accept().await {
-        let server_clone = Arc::clone(&server);
+        let server = Arc::clone(&server);
         tokio::spawn(async move {
-            server_clone.handle_connection(stream).await;
+            server.handle_connection(stream).await;
         });
     }
 }

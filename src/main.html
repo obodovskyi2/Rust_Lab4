@@ -1,196 +1,332 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebSocket Chat</title>
     <style>
         body {
             font-family: Arial, sans-serif;
+            background: #f7f7f7;
             margin: 0;
             padding: 20px;
-            background-color: #f9f9f9;
         }
+
+        h1, h2, h3, h4 {
+            font-weight: normal;
+            margin: 0 0 20px;
+        }
+
         .status {
             margin: 10px 0;
             padding: 10px;
             border-radius: 4px;
             font-size: 14px;
         }
-        .success { background-color: #dff0d8; color: #3c763d; }
-        .error { background-color: #f2dede; color: #a94442; }
+
+        .success {
+            background-color: #dff0d8;
+            border: 1px solid #d0e9c6;
+        }
+
+        .error {
+            background-color: #f2dede;
+            border: 1px solid #ebccd1;
+        }
+
+        #userControls {
+            margin: 20px 0;
+        }
+
+        #userControls input[type="text"],
+        #userControls input[type="password"] {
+            padding: 8px;
+            margin-right: 5px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+            width: 150px;
+        }
+
+        #userControls button {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            background: #428bca;
+            color: #fff;
+            margin-right: 5px;
+        }
+
+        #userControls button:hover {
+            background: #3071a9;
+        }
+
+        #chatInput {
+            margin: 20px 0;
+        }
+
+        #chatInput input[type="text"] {
+            padding: 8px;
+            margin-right: 5px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            width: 300px;
+            font-size: 14px;
+        }
+
+        #chatInput button {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            background: #5cb85c;
+            color: #fff;
+        }
+
+        #chatInput button:hover {
+            background: #4cae4c;
+        }
+
         #messages {
             margin-top: 20px;
             border: 1px solid #ccc;
+            background: #fff;
             padding: 10px;
             height: 300px;
             overflow-y: auto;
-            background-color: #fff;
+            border-radius: 4px;
         }
+
         .message {
             margin: 5px 0;
-            padding: 5px;
+            padding: 5px 0;
             border-bottom: 1px solid #eee;
         }
+
         .message strong {
             color: #333;
         }
-        input[type="text"], input[type="password"] {
-            padding: 8px;
-            margin: 5px 0;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            width: calc(100% - 20px);
-            max-width: 300px;
-            display: block;
-        }
-        button {
-            padding: 10px 15px;
-            margin: 5px;
-            border: none;
-            background-color: #007bff;
-            color: #fff;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-        button:disabled {
-            background-color: #ccc;
-            cursor: not-allowed;
+
+        .message:last-child {
+            border-bottom: none;
         }
     </style>
 </head>
 <body>
-<div id="statusMessages" class="status"></div>
-<div>
-    <input type="text" id="username" placeholder="Username">
-    <input type="password" id="password" placeholder="Password">
-    <button onclick="register()">Register</button>
-    <button onclick="connect()">Connect</button>
-</div>
-<div>
-    <input type="text" id="message" placeholder="Type a message...">
-    <button onclick="sendMessage()" id="sendButton">Send</button>
-</div>
-<div id="messages"></div>
+    <h1>WebSocket Chat</h1>
+    <div id="statusMessages" class="status"></div>
 
-<script>
-    let ws;
-    let username;
-    let isAuthenticated = false;
+    <div id="userControls">
+        <input type="text" id="username" placeholder="Username">
+        <input type="password" id="password" placeholder="Password">
+        <button onclick="registerUser()">Register</button>
+        <button onclick="connectUser()">Connect</button>
+    </div>
 
-    function showStatus(message, isError = false) {
-        const statusDiv = document.getElementById('statusMessages');
-        statusDiv.textContent = message;
-        statusDiv.className = 'status ' + (isError ? 'error' : 'success');
-        console.log(message);
-    }
+    <div id="chatInput">
+        <input type="text" id="message" placeholder="Type a message..." disabled>
+        <button onclick="sendMessage()" disabled id="sendButton">Send</button>
+    </div>
 
-    function toggleMessageInput(enabled) {
-        document.getElementById('message').disabled = !enabled;
-        document.getElementById('sendButton').disabled = !enabled;
-        isAuthenticated = enabled;
-    }
+    <div id="messages"></div>
 
-    function addMessage(message) {
-        const messagesDiv = document.getElementById('messages');
-        const messageElement = document.createElement('div');
-        messageElement.className = 'message';
-        messageElement.innerHTML = `<strong>${message.from}:</strong> ${message.content}`;
-        messagesDiv.appendChild(messageElement);
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    }
+    <script>
+        let ws = null;
+        let username = '';
+        let isAuthenticated = false;
 
-    function register() {
-        username = document.getElementById('username').value.trim();
-        const password = document.getElementById('password').value.trim();
-
-        if (!username || !password) {
-            showStatus('Please enter both username and password', true);
-            return;
+        function showStatus(message, isError = false) {
+            const statusDiv = document.getElementById('statusMessages');
+            statusDiv.textContent = message;
+            statusDiv.className = 'status ' + (isError ? 'error' : 'success');
+            console.log(message);
         }
 
-        showStatus('Attempting to register...');
-        initializeWebSocket('register', { username, password });
-    }
-
-    function connect() {
-        username = document.getElementById('username').value.trim();
-        const password = document.getElementById('password').value.trim();
-
-        if (!username || !password) {
-            showStatus('Please enter both username and password', true);
-            return;
+        function enableMessageInput() {
+            document.getElementById('message').disabled = false;
+            document.getElementById('sendButton').disabled = false;
+            isAuthenticated = true;
         }
 
-        showStatus('Attempting to connect...');
-        initializeWebSocket('login', { username, password });
-    }
+        function disableMessageInput() {
+            document.getElementById('message').disabled = true;
+            document.getElementById('sendButton').disabled = true;
+            isAuthenticated = false;
+        }
 
-    function initializeWebSocket(type, credentials) {
-        ws = new WebSocket('ws://localhost:8080');
+        function addMessage(message) {
+            const messagesDiv = document.getElementById('messages');
+            const messageElement = document.createElement('div');
+            messageElement.className = 'message';
+            const from = message.from ? message.from : "Server";
+            const content = message.content ? message.content : JSON.stringify(message);
+            messageElement.innerHTML = `<strong>${from}:</strong> ${content}`;
+            messagesDiv.appendChild(messageElement);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
 
-        ws.onopen = () => {
-            showStatus('Connected to server');
-            ws.send(JSON.stringify({ type, ...credentials }));
-        };
+        function clearMessages() {
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.innerHTML = '';
+        }
 
-        ws.onmessage = (event) => {
-            try {
-                const message = JSON.parse(event.data);
-                if (message.content) {
-                    addMessage(message);
-                } else {
-                    handleServerResponse(event.data);
-                }
-            } catch (e) {
-                showStatus('Server response: ' + event.data);
+        function closeCurrentConnection(callback) {
+            // If ws is open or connecting, close it before starting a new action
+            if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+                ws.onclose = () => {
+                    ws = null;
+                    if (callback) callback();
+                };
+                ws.close();
+            } else {
+                ws = null;
+                if (callback) callback();
             }
-        };
-
-        ws.onerror = (error) => {
-            showStatus('WebSocket error: ' + error.message, true);
-        };
-
-        ws.onclose = () => {
-            showStatus('Connection closed');
-            toggleMessageInput(false);
-        };
-    }
-
-    function handleServerResponse(response) {
-        if (response === 'Authentication successful') {
-            showStatus('Successfully authenticated');
-            toggleMessageInput(true);
-        } else if (response === 'Authentication failed' || response === 'Registration failed') {
-            showStatus(response, true);
-        } else {
-            showStatus(response);
         }
-    }
 
-    function sendMessage() {
-        const content = document.getElementById('message').value.trim();
-        if (!content) return;
+        function registerUser() {
+            const uname = document.getElementById('username').value.trim();
+            const pwd = document.getElementById('password').value.trim();
 
-        const message = {
-            from: username,
-            content,
-            timestamp: Date.now()
-        };
+            if (!uname || !pwd) {
+                showStatus('Please enter both username and password', true);
+                return;
+            }
 
-        try {
-            ws.send(JSON.stringify(message));
-            document.getElementById('message').value = '';
-        } catch (error) {
-            showStatus('Error sending message: ' + error.message, true);
+            closeCurrentConnection(() => {
+                showStatus('Attempting to register...');
+                username = uname;
+                ws = new WebSocket('ws://0.0.0.0:8080');
+
+                ws.onopen = () => {
+                    showStatus('Connected to server, sending registration...');
+                    ws.send(JSON.stringify({
+                        type: "register",
+                        username: username,
+                        password: pwd
+                    }));
+                };
+
+                ws.onmessage = (event) => {
+                    showStatus('Server response: ' + event.data);
+                };
+
+                ws.onerror = (event) => {
+                    console.error('WebSocket error during registration:', event);
+                    showStatus('WebSocket error during registration. Check console.', true);
+                };
+
+                ws.onclose = () => {
+                    if (!isAuthenticated) {
+                        disableMessageInput();
+                    }
+                    ws = null;
+                };
+            });
         }
-    }
 
-    document.getElementById('message').addEventListener('keypress', function (e) {
-        if (e.key === 'Enter') {
-            sendMessage();
+        function connectUser() {
+            const uname = document.getElementById('username').value.trim();
+            const pwd = document.getElementById('password').value.trim();
+
+            if (!uname || !pwd) {
+                showStatus('Please enter both username and password', true);
+                return;
+            }
+
+            closeCurrentConnection(() => {
+                showStatus('Attempting to connect...');
+                username = uname;
+                ws = new WebSocket('ws://0.0.0.0:8080');
+
+                ws.onopen = () => {
+                    showStatus('Connected to server, sending login credentials...');
+                    ws.send(JSON.stringify({
+                        type: "login",
+                        username: username,
+                        password: pwd
+                    }));
+                };
+
+                ws.onmessage = (event) => {
+                    console.log('Received message:', event.data);
+
+                    if (event.data === 'Authentication failed') {
+                        showStatus('Authentication failed', true);
+                        ws.close();
+                        return;
+                    }
+
+                    if (event.data === 'Authentication successful') {
+                        showStatus('Successfully connected and authenticated');
+                        clearMessages();
+                        enableMessageInput();
+                        return;
+                    }
+
+                    if (event.data === 'User is already connected') {
+                        showStatus('User is already connected', true);
+                        ws.close();
+                        return;
+                    }
+
+                    // Attempt to parse as JSON message
+                    try {
+                        const message = JSON.parse(event.data);
+                        console.log('Parsed message:', message);
+                        addMessage(message);
+                    } catch (e) {
+                        // If it's not JSON, just show as status
+                        showStatus('Received: ' + event.data);
+                    }
+                };
+
+                ws.onerror = (event) => {
+                    console.error('WebSocket error:', event);
+                    showStatus('WebSocket error occurred. See console for details.', true);
+                };
+
+                ws.onclose = () => {
+                    showStatus('Connection closed');
+                    disableMessageInput();
+                    ws = null;
+                };
+            });
         }
-    });
-</script>
+
+        function sendMessage() {
+            if (!isAuthenticated || !ws || ws.readyState !== WebSocket.OPEN) {
+                showStatus('Not authenticated or connection not open. Please connect first.', true);
+                return;
+            }
+
+            const messageInput = document.getElementById('message');
+            const content = messageInput.value.trim();
+            if (!content) return;
+
+            const message = {
+                from: username,
+                content: content,
+                timestamp: Date.now()
+            };
+
+            try {
+                console.log('Sending message:', message);
+                ws.send(JSON.stringify(message));
+                messageInput.value = '';
+                // We wait for the server to broadcast the message back before adding it to the UI.
+            } catch (error) {
+                console.error('Error sending message:', error);
+                showStatus('Error sending message. Check console.', true);
+            }
+        }
+
+        document.getElementById('message').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
 </body>
 </html>
